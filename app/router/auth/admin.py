@@ -6,8 +6,12 @@ from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr
 from typing import Annotated
 from sqlmodel import Session, select
-from ...models import User as UserModel
+from ...models import User as UserModel, AdminRole
 from ...core.database import SessionDep
+from fastapi import Security
+from fastapi.security import OAuth2PasswordBearer
+import jwt
+
 
 # Reuse password hashing logic
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -56,12 +60,45 @@ router = APIRouter(
     tags=["Admin Auth"],
 )
 
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/admin/login")
+
+def get_current_admin(session: SessionDep, token: str = Depends(oauth2_scheme)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+        user = get_user_by_username(session, username)
+        if user is None or not user.is_admin:
+            raise credentials_exception
+        return user
+    except Exception:
+        raise credentials_exception
+
+def require_role(required_roles: list[AdminRole]):
+    def role_checker(
+        current_admin: UserModel = Depends(get_current_admin)
+    ):
+        if current_admin.role not in required_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Insufficient permissions. Required: {required_roles}, found: {current_admin.role}"
+            )
+        return current_admin
+    return role_checker
+
 # Pydantic models
 class AdminRegisterRequest(BaseModel):
     username: str
     email: EmailStr
     password: str
     admin_code: str
+    role: AdminRole = AdminRole.viewer
 
 class AdminLoginRequest(BaseModel):
     username: str
@@ -72,6 +109,7 @@ class AdminResponse(BaseModel):
     username: str
     email: str
     is_admin: bool
+    role: AdminRole
     created_at: datetime
 
 class Token(BaseModel):
@@ -107,12 +145,26 @@ async def register_admin(
         )
     # Hash password
     hashed_password = get_password_hash(admin_data.password)
+
+    # Only allow super_admin creation if there is already a super_admin in the system
+    requested_role = admin_data.role
+    if requested_role == AdminRole.super_admin:
+        existing_super_admin = session.exec(
+            select(UserModel).where(UserModel.role == AdminRole.super_admin)
+        ).first()
+        if existing_super_admin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Super admin can only be created by another super admin"
+            )
+
     # Create admin user
     new_admin = UserModel(
         username=admin_data.username,
         email=admin_data.email,
         password=hashed_password,
         is_admin=True,
+        role=admin_data.role,
         disabled=False,
         terms_accepted=True,  # Admins must accept terms
         created_at=datetime.utcnow()
@@ -125,12 +177,85 @@ async def register_admin(
         username=new_admin.username,
         email=new_admin.email,
         is_admin=new_admin.is_admin,
+        role=new_admin.role,
         created_at=new_admin.created_at
+    )
+    # Send credentials email (send plain password as provided)
+    await send_admin_credentials_email(
+        email=new_admin.email,
+        username=new_admin.username,
+        password=admin_data.password,
+        role=new_admin.role
     )
     return RegisterResponse(
         message="Admin registered successfully",
         admin=admin_response
     )
+
+SMTP_SERVER = os.getenv("SMTP_SERVER")
+SMTP_PORT = int(os.getenv("SMTP_PORT"))
+EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+
+async def send_admin_credentials_email(email: str, username: str, password: str, role: str):
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+    try:
+        subject = "Your Rafikey Admin Account Credentials"
+        html_body = f"""
+        <html>
+        <body>
+            <h2>Welcome to Rafikey Admin Panel</h2>
+            <p>Your admin account has been created with the following credentials:</p>
+            <ul>
+                <li><b>Username:</b> {username}</li>
+                <li><b>Password:</b> {password}</li>
+                <li><b>Role:</b> {role}</li>
+            </ul>
+            <p>Please log in and change your password as soon as possible.</p>
+            <p>For security, do not share these credentials with anyone.</p>
+            <br>
+            <p>Best regards,<br>Rafikey Team</p>
+        </body>
+        </html>
+        """
+        text_body = f"""Welcome to Rafikey Admin Panel
+
+Your admin account has been created with the following credentials:
+
+Username: {username}
+Password: {password}
+Role: {role}
+
+Please log in and change your password as soon as possible.
+For security, do not share these credentials with anyone.
+
+Best regards,
+Rafikey Team
+"""
+        message = MIMEMultipart("alternative")
+        message["Subject"] = subject
+        message["From"] = EMAIL_ADDRESS
+        message["To"] = email
+
+        text_part = MIMEText(text_body, "plain")
+        html_part = MIMEText(html_body, "html")
+        message.attach(text_part)
+        message.attach(html_part)
+
+        if SMTP_PORT == 465:
+            with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as server:
+                server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+                server.send_message(message)
+        else:
+            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+                server.starttls()
+                server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+                server.send_message(message)
+    except Exception as e:
+        print(f"Failed to send admin credentials email to {email}: {str(e)}")
+        pass
 
 # Admin login endpoint
 @router.post("/login", response_model=Token)
@@ -147,16 +272,25 @@ async def login_admin(
         )
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": admin.username, "is_admin": True},
+        data={
+            "sub": admin.username,
+            "is_admin": True,
+            "role": str(admin.role) if hasattr(admin, "role") else None
+        },
         secret_key=SECRET_KEY,
         algorithm=ALGORITHM,
         expires_delta=access_token_expires
     )
     return Token(access_token=access_token, token_type="bearer")
+
 @router.get("/list", response_model=list[AdminResponse])
-async def list_admins(session: SessionDep):
+async def list_admins(
+    session: SessionDep,
+    current_admin: UserModel = Depends(require_role([AdminRole.super_admin]))
+):
     """
     List all admin users.
+    Only accessible by super_admin.
     """
     admins = session.exec(
         select(UserModel).where(UserModel.is_admin == True)
@@ -167,7 +301,26 @@ async def list_admins(session: SessionDep):
             username=admin.username,
             email=admin.email,
             is_admin=admin.is_admin,
+            role=admin.role,
             created_at=admin.created_at
         )
         for admin in admins
     ]
+
+@router.delete("/delete/{admin_id}", status_code=204)
+async def delete_admin(
+    admin_id: int,
+    session: SessionDep,
+    current_admin: UserModel = Depends(require_role([AdminRole.super_admin]))
+):
+    """
+    Delete an admin user by ID. Only accessible by super_admin.
+    """
+    admin_to_delete = session.get(UserModel, admin_id)
+    if not admin_to_delete or not admin_to_delete.is_admin:
+        raise HTTPException(status_code=404, detail="Admin not found")
+    if admin_to_delete.role == AdminRole.super_admin:
+        raise HTTPException(status_code=403, detail="Cannot delete a super admin")
+    session.delete(admin_to_delete)
+    session.commit()
+    return {"detail": "Admin deleted successfully"}

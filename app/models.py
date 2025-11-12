@@ -2,6 +2,7 @@ from typing import Annotated, List, Optional
 from sqlmodel import Field, Session, SQLModel, create_engine, select, Relationship
 from datetime import datetime
 from pydantic import BaseModel
+from enum import Enum
 
 
 class Hero(SQLModel, table=True):
@@ -10,6 +11,11 @@ class Hero(SQLModel, table=True):
     age: int | None = Field(default=None, index=True)
     secret_name: str
 
+
+class AdminRole(str, Enum):
+    super_admin = "super_admin"
+    editor = "editor"
+    viewer = "viewer"
 
 class User(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
@@ -22,6 +28,7 @@ class User(SQLModel, table=True):
     password: str  # This should store the hashed password
     disabled: bool = Field(default=False)  # Optional: for user activation
     is_admin: bool = Field(default=False, index=True)  # New field to indicate admin user
+    role: AdminRole = Field(default=AdminRole.viewer, sa_column_kwargs={"nullable": False, "server_default": "viewer"})
     created_at: datetime = Field(default_factory=datetime.utcnow)
     
     # Relationship to conversations
