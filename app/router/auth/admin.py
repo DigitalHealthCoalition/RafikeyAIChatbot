@@ -286,7 +286,7 @@ async def login_admin(
 @router.get("/list", response_model=list[AdminResponse])
 async def list_admins(
     session: SessionDep,
-    current_admin: UserModel = Depends(require_role([AdminRole.super_admin]))
+    current_admin: UserModel = Depends(require_role([AdminRole.super_admin, AdminRole.editor, AdminRole.viewer]))
 ):
     """
     List all admin users.

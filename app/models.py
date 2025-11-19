@@ -106,6 +106,8 @@ class Feedback(SQLModel, table=True):
     question: Question = Relationship(back_populates="feedback")
 
 
+
+
 class Rating(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id")

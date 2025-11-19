@@ -326,3 +326,81 @@ def submit_rating(
     session.refresh(rating_obj)
     return {"message": "Rating submitted successfully", "id": rating_obj.id}
 
+
+#  Feedback 
+
+# --- User Feedback Submission Endpoint ---
+class FeedbackCreate(BaseModel):
+    emoji: str
+    comment: str | None = None
+
+
+@router.get("/user_satisfaction")
+def feedback_analysis(session: SessionDep):
+    from app.models import Rating
+    from collections import Counter
+
+    # Fetch all feedback ratings
+    feedbacks = session.exec(select(Rating)).all()
+    if not feedbacks:
+        return {
+            "total_feedback": 0,
+            "emoji_distribution": {},
+            "recent_comments": []
+        }
+
+    # Count emojis
+    emoji_counts = Counter(f.emoji for f in feedbacks if f.emoji)
+    # Get recent comments (non-empty, most recent 10)
+    recent_comments = [
+        {"user_id": f.user_id, "emoji": f.emoji, "comment": f.option}
+        for f in sorted(feedbacks, key=lambda x: x.id, reverse=True)
+        if f.option
+    ][:10]
+
+    return {
+        "total_feedback": len(feedbacks),
+        "emoji_distribution": dict(emoji_counts),
+        "recent_comments": recent_comments
+    }
+
+
+# @router.get("/service_finder_usage")
+# def service_finder_usage(session: SessionDep):
+#     from app.models import Conversations, User
+#     # Find all conversations where the bot_response mentions "service finder"
+#     keyword = "service finder"
+#     service_finder_convos = session.exec(
+#         select(Conversations).where(Conversations.bot_response.ilike(f"%{keyword}%"))
+#     ).all()
+#     total_uses = len(service_finder_convos)
+#     # Unique users who used the service finder
+#     user_ids = set(c.user_id for c in service_finder_convos)
+#     total_users = session.exec(select(User.id)).all()
+#     percent_users = (len(user_ids) / len(total_users) * 100) if total_users else 0
+#     return {
+#         "service_finder_uses": total_uses,
+#         "unique_users": len(user_ids),
+#         "percent_users": percent_users
+#     }
+
+@router.get("/service_finder_usage")
+def service_finder_usage(session: SessionDep):
+    from app.models import Conversations, User
+    from sqlalchemy import or_
+    # Define keywords that trigger the service finder
+    keywords = ["clinic", "hospital", "service"]
+    # Build a filter for any keyword in user_message (case-insensitive)
+    filters = [Conversations.user_message.ilike(f"%{kw}%") for kw in keywords]
+    service_finder_convos = session.exec(
+        select(Conversations).where(or_(*filters))
+    ).all()
+    total_uses = len(service_finder_convos)
+    user_ids = set(c.user_id for c in service_finder_convos)
+    total_users = session.exec(select(User.id)).all()
+    return {
+        "service_finder_uses": total_uses,
+        "unique_users": len(user_ids),
+   
+    }
+
