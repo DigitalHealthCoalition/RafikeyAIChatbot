@@ -236,6 +236,53 @@ def get_demographic_reach(session: SessionDep):
         "gender_breakdown": {g: c for g, c in genders},
         "age_breakdown": {a: c for a, c in ages}
     }
+# 12b. Gender Demographic Analysis (Gender Only)
+@router.get("/gender_analysis")
+def get_gender_analysis(session: SessionDep):
+    """
+    Returns a breakdown of users by gender only, with fixed categories:
+    Male, Female, Non-Binary, Rather Not Say.
+    """
+    total = session.exec(select(func.count(User.id))).one()
+    if total == 0:
+        return {
+            "total_users": 0,
+            "gender_breakdown": {
+                "Male": 0,
+                "Female": 0,
+                "Non-Binary": 0,
+                "Rather Not Say": 0
+            }
+        }
+    # Map all gender values to the four categories
+    genders = session.exec(
+        select(User.gender, func.count(User.id)).group_by(User.gender)
+    ).all()
+    # Normalize and count
+    categories = {
+        "Male": 0,
+        "Female": 0,
+        "Non-Binary": 0,
+        "Rather Not Say": 0
+    }
+    for g, c in genders:
+        if g is None or str(g).strip() == "" or str(g).lower() in {"rather not say", "prefer not to say", "n/a", "none"}:
+            categories["Rather Not Say"] += c
+        elif str(g).lower() in {"male", "m"}:
+            categories["Male"] += c
+        elif str(g).lower() in {"female", "f"}:
+            categories["Female"] += c
+        elif str(g).lower() in {"non-binary", "nonbinary", "non binary", "nb"}:
+            categories["Non-Binary"] += c
+        else:
+            # Any other value is treated as "Rather Not Say"
+            categories["Rather Not Say"] += c
+    return {
+        "total_users": total,
+        "gender_breakdown": categories
+    }
+
+
 
 # 13. AI Response Accuracy - Placeholder
 @router.get("/ai_response_accuracy")
