@@ -124,7 +124,8 @@ class RegisterResponse(BaseModel):
 @router.post("/register", response_model=RegisterResponse)
 async def register_admin(
     admin_data: AdminRegisterRequest,
-    session: SessionDep
+    session: SessionDep,
+    current_admin: UserModel = Depends(get_current_admin)
 ):
     # Check admin code
     if admin_data.admin_code != ADMIN_REGISTRATION_CODE:
@@ -146,17 +147,19 @@ async def register_admin(
     # Hash password
     hashed_password = get_password_hash(admin_data.password)
 
-    # Only allow super_admin creation if there is already a super_admin in the system
     requested_role = admin_data.role
     if requested_role == AdminRole.super_admin:
         existing_super_admin = session.exec(
             select(UserModel).where(UserModel.role == AdminRole.super_admin)
         ).first()
         if existing_super_admin:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Super admin can only be created by another super admin"
-            )
+            # Only allow a logged-in super admin to create another super admin
+            if not current_admin or current_admin.role != AdminRole.super_admin:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Super admin can only be created by another super admin"
+                )
+        # If no super admin exists, allow creation (initial setup)
 
     # Create admin user
     new_admin = UserModel(
